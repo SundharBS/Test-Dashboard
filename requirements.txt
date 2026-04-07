@@ -3,3 +3,4 @@ yfinance
 pandas
 openpyxl
 numpy
+streamlit-autorefresh
