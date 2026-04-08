@@ -2,8 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 from datetime import date
-from io import BytesIO
 from streamlit_autorefresh import st_autorefresh
+from nsepython import nse_eq
 
 st.set_page_config(layout="wide")
 st.title("📊 Investment Banking Dashboard")
@@ -15,288 +15,283 @@ st_autorefresh(interval=30000, key="auto_refresh")
 start_date = st.sidebar.date_input("Start Date", date(2023,1,1))
 end_date = st.sidebar.date_input("End Date", date.today())
 
-# ---------------- EXCEL FUNCTION ----------------
-def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False)
-    return output.getvalue()
+# ---------------- NSE PRICE ----------------
+@st.cache_data(ttl=15)
+def get_nse_price(ticker):
+    try:
+        return nse_eq(ticker.replace(".NS",""))["priceInfo"]["lastPrice"]
+    except:
+        return None
 
-# ---------------- CACHE ----------------
-@st.cache_data(ttl=30)
-def get_info(ticker):
-    return yf.Ticker(ticker).info
+# ---------------- CSV ----------------
+@st.cache_data(ttl=86400)
+def load_csv():
+    df = pd.read_csv("nse_stocks.csv")
+    df.columns = df.columns.str.strip()
+    if "SERIES" in df.columns:
+        df = df[df["SERIES"]=="EQ"]
+    return df
 
-@st.cache_data(ttl=30)
-def get_data(ticker, **kwargs):
-    return yf.download(ticker, **kwargs)
+@st.cache_data(ttl=86400)
+def build_map():
+    df = load_csv()
+    mp = {}
+    for _, r in df.iterrows():
+        name = r.get("NAME OF COMPANY","")
+        sym = r.get("SYMBOL","")
+        if sym:
+            mp[f"{name} ({sym})"] = sym+".NS"
+    return mp
 
-# ---------------- STOCK LIST ----------------
-stock_map = {
-    "Apple (AAPL)": "AAPL",
-    "Microsoft (MSFT)": "MSFT",
-    "Tesla (TSLA)": "TSLA",
-    "Amazon (AMZN)": "AMZN",
-    "Google (GOOGL)": "GOOGL",
-    "Meta (META)": "META",
-    "Nvidia (NVDA)": "NVDA",
-    "Reliance (RELIANCE.NS)": "RELIANCE.NS",
-    "TCS (TCS.NS)": "TCS.NS",
-    "Infosys (INFY.NS)": "INFY.NS",
-    "HDFC Bank (HDFCBANK.NS)": "HDFCBANK.NS",
-    "ICICI Bank (ICICIBANK.NS)": "ICICIBANK.NS",
-    "Axis Bank (AXISBANK.NS)": "AXISBANK.NS",
-    "SBI (SBIN.NS)": "SBIN.NS",
-    "ITC (ITC.NS)": "ITC.NS"
-}
+stock_map = build_map()
 
-selected_display = st.multiselect("🔍 Search Stocks", options=list(stock_map.keys()))
-tickers = [stock_map[name] for name in selected_display]
+# ---------------- SEARCH ----------------
+selected = st.multiselect("🔍 Search Stocks", list(stock_map.keys()))
+tickers = [stock_map[i] for i in selected]
+
+# ---------------- SAFE PLOT ----------------
+def safe_plot(data_dict, title):
+    st.subheader(title)
+
+    if not data_dict:
+        st.warning(f"{title} not available")
+        return
+
+    try:
+        df = pd.DataFrame(data_dict)
+
+        df = df.apply(pd.to_numeric, errors='coerce')
+        df = df.dropna(how="all")
+        df = df.dropna(axis=1, how="all")
+
+        if df.empty or df.shape[1] == 0:
+            st.warning(f"{title} not available")
+            return
+
+        df = df.sort_index()
+
+        st.line_chart(df)
+
+    except:
+        st.warning(f"{title} failed to render")
 
 # ---------------- TABS ----------------
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📈 Overview","📊 Comparables","📉 Benchmark","💰 Valuation"
-])
+tab1, tab2, tab3, tab4 = st.tabs(["📈 Overview","📊 Comparables","📉 Benchmark","💰 Valuation"])
 
 # ---------------- OVERVIEW ----------------
 with tab1:
-    if not tickers:
-        st.warning("Select stocks")
-    else:
+    if tickers:
         st.subheader("Live Prices")
-
         for t in tickers:
-            info = get_info(t)
-            price = info.get("currentPrice")
-            prev = info.get("previousClose")
-            currency = info.get("currency", "USD")
+            st.write(f"{t}: ₹{get_nse_price(t)}")
 
-            symbol_map = {"INR": "₹", "USD": "$"}
-            symbol = symbol_map.get(currency, currency)
+        try:
+            st.subheader("Intraday")
+            intraday = yf.download(tickers, period="1d", interval="5m")["Close"]
+            st.line_chart(intraday)
+        except:
+            st.warning("Intraday data not available")
 
-            if price and prev:
-                change = ((price - prev) / prev) * 100
-                st.write(f"{t}: {symbol}{round(price,2)} ({round(change,2)}%)")
-
-        # -------- Intraday --------
-        st.subheader("Intraday Movement")
-        data_live = get_data(tuple(tickers), period="1d", interval="5m")
-
-        if not data_live.empty:
-            if isinstance(data_live.columns, pd.MultiIndex):
-                close_live = data_live["Close"]
-            else:
-                close_live = pd.DataFrame(data_live["Close"])
-
-            st.line_chart(close_live)
-
-        # -------- Historical --------
-        st.subheader("Historical Trend")
-        data_hist = get_data(tuple(tickers), start=start_date, end=end_date)
-
-        if not data_hist.empty:
-            if isinstance(data_hist.columns, pd.MultiIndex):
-                close_hist = data_hist["Close"]
-            else:
-                close_hist = pd.DataFrame(data_hist["Close"])
-
-            st.line_chart(close_hist)
+        try:
+            st.subheader("Historical Trend")
+            hist = yf.download(tickers, start=start_date, end=end_date)["Close"]
+            st.line_chart(hist)
+        except:
+            st.warning("Historical data not available")
 
 # ---------------- COMPARABLES ----------------
 with tab2:
+
     rows = []
-    sectors = {}
 
     for t in tickers:
-        info = get_info(t)
+        try:
+            stock = yf.Ticker(t)
+            info = stock.info
+            price = get_nse_price(t)
 
-        price = info.get("currentPrice")
-        eps = info.get("trailingEps")
-        book = info.get("bookValue")
-        roe = info.get("returnOnEquity")
-        beta = info.get("beta")
-        sector = info.get("sector")
+            eps = info.get("trailingEps") or 0
+            book = info.get("bookValue") or 0
+            roe = info.get("returnOnEquity")
+            roa = info.get("returnOnAssets")
 
-        sectors[t] = sector
+            pe = (price / eps) if price and eps else None
+            pb = (price / book) if price and book else None
 
-        pe = price / eps if price and eps else None
-        pb = price / book if price and book else None
+            if roe is None:
+                ni = info.get("netIncomeToCommon")
+                eq = info.get("totalStockholderEquity")
+                if ni and eq:
+                    roe = ni / eq
 
-        rows.append({
-            "Company": t,
-            "Sector": sector,
-            "Price": price,
-            "P/E": round(pe,2) if pe else None,
-            "P/B": round(pb,2) if pb else None,
-            "ROE": roe,
-            "Beta": beta
-        })
+            if roa is None:
+                ni = info.get("netIncomeToCommon")
+                assets = info.get("totalAssets")
+                if ni and assets:
+                    roa = ni / assets
+
+            rows.append({
+                "Company": t,
+                "Price": round(price,2) if price else None,
+                "P/E": round(pe,2) if pe else None,
+                "P/B": round(pb,2) if pb else None,
+                "ROE %": round(roe*100,2) if roe else None,
+                "ROA %": round(roa*100,2) if roa else None
+            })
+
+        except:
+            rows.append({
+                "Company": t,
+                "Price": None,
+                "P/E": None,
+                "P/B": None,
+                "ROE %": None,
+                "ROA %": None
+            })
 
     df = pd.DataFrame(rows)
-    st.dataframe(df)
+    st.dataframe(df.fillna("N/A"))
 
-    # -------- PEERS --------
-    st.subheader("Peer Comparison")
+    # ---------- REVENUE ----------
+    rev_data = {}
+    for t in tickers:
+        try:
+            inc = yf.Ticker(t).financials.T
+            if "Total Revenue" in inc.columns:
+                rev_data[t] = inc["Total Revenue"]
+        except:
+            continue
+    safe_plot(rev_data, "📊 Revenue Trend")
 
-    peer_rows = []
-    peer_universe = list(stock_map.values())
+    # ---------- ROE ----------
+    roe_data = {}
+    for t in tickers:
+        try:
+            stock = yf.Ticker(t)
+            inc = stock.financials.T
+            bal = stock.balance_sheet.T
+
+            ni_col = [c for c in inc.columns if "net" in c.lower()]
+            eq_col = [c for c in bal.columns if "equity" in c.lower()]
+
+            if ni_col and eq_col:
+                roe_data[t] = inc[ni_col[0]] / bal[eq_col[0]]
+        except:
+            continue
+    safe_plot(roe_data, "📊 ROE Trend")
+
+    # ---------- P/B TREND ----------
+    pb_data = {}
 
     for t in tickers:
-        sector = sectors.get(t)
+        try:
+            stock = yf.Ticker(t)
+            bal = stock.balance_sheet.T
 
-        for p in peer_universe:
-            p_info = get_info(p)
+            if bal.empty:
+                continue
 
-            if p_info.get("sector") == sector and p != t:
-                price = p_info.get("currentPrice")
-                eps = p_info.get("trailingEps")
-                book = p_info.get("bookValue")
-                beta = p_info.get("beta")
+            eq_col = [c for c in bal.columns if "equity" in c.lower()]
+            if not eq_col:
+                continue
 
-                pe = price / eps if price and eps else None
-                pb = price / book if price and book else None
+            shares = stock.info.get("sharesOutstanding")
+            if not shares:
+                continue
 
-                peer_rows.append({
-                    "Company": p,
-                    "Sector": sector,
-                    "P/E": round(pe,2) if pe else None,
-                    "P/B": round(pb,2) if pb else None,
-                    "ROE": p_info.get("returnOnEquity"),
-                    "Beta": beta
-                })
+            price = yf.download(t, period="5y")["Close"]
+            if price.empty:
+                continue
 
-    peer_df = pd.DataFrame(peer_rows).drop_duplicates()
-    st.dataframe(peer_df)
+            values = []
 
-    st.download_button("📥 Download Comparables", to_excel(peer_df), "comparables.xlsx")
+            for dt in bal.index:
+                try:
+                    p = price.loc[:dt].iloc[-1]
+                    eq = bal.loc[dt, eq_col[0]]
+
+                    val = p / (eq / shares)
+
+                    if isinstance(val, (int, float)):
+                        values.append(val)
+                    else:
+                        values.append(None)
+
+                except:
+                    values.append(None)
+
+            s = pd.Series(values, index=bal.index)
+
+            if s.notna().sum() > 1:
+                pb_data[t] = s
+
+        except:
+            continue
+
+    safe_plot(pb_data, "📊 P/B Trend")
+
+    # ---------- MARGIN ----------
+    margin_data = {}
+    for t in tickers:
+        try:
+            inc = yf.Ticker(t).financials.T
+
+            ni_col = [c for c in inc.columns if "net" in c.lower()]
+            rev_col = [c for c in inc.columns if "revenue" in c.lower()]
+
+            if ni_col and rev_col:
+                margin_data[t] = inc[ni_col[0]] / inc[rev_col[0]]
+        except:
+            continue
+    safe_plot(margin_data, "📊 Profit Margin Trend")
 
 # ---------------- BENCHMARK ----------------
 with tab3:
-    benchmark = "^NSEI"
-    bench = get_data(benchmark, start=start_date, end=end_date)
-
-    if not bench.empty:
-        bench_close = bench["Close"].dropna()
-        if isinstance(bench_close, pd.DataFrame):
-            bench_close = bench_close.iloc[:,0]
-
-        bench_return = (bench_close.iloc[-1] / bench_close.iloc[0]) - 1
-
+    try:
+        bench = yf.download("^NSEI", start=start_date, end=end_date)["Close"]
         results = []
 
         for t in tickers:
-            stock = get_data(t, start=start_date, end=end_date)
-            close = stock["Close"].dropna()
+            s = yf.download(t, start=start_date, end=end_date)["Close"]
 
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:,0]
+            if len(s) > 1:
+                r = (s.iloc[-1]/s.iloc[0]) - 1
+                b = (bench.iloc[-1]/bench.iloc[0]) - 1
 
-            r = (close.iloc[-1] / close.iloc[0]) - 1
+                results.append({
+                    "Stock": t,
+                    "Return %": r * 100,
+                    "Benchmark %": b * 100
+                })
 
-            results.append({
-                "Stock": t,
-                "Return %": round(r*100,2),
-                "Benchmark %": round(bench_return*100,2),
-                "Outperformance %": round((r-bench_return)*100,2)
-            })
-
-        df_bench = pd.DataFrame(results)
-        st.dataframe(df_bench)
-
-        st.download_button("📥 Download Benchmark", to_excel(df_bench), "benchmark.xlsx")
+        st.dataframe(pd.DataFrame(results))
+    except:
+        st.warning("Benchmark data not available")
 
 # ---------------- VALUATION ----------------
 with tab4:
     results = []
 
     for t in tickers:
-        info = get_info(t)
+        try:
+            info = yf.Ticker(t).info
+            price = get_nse_price(t)
+            eps = info.get("trailingEps")
 
-        price = info.get("currentPrice")
-        eps = info.get("trailingEps")
-        book = info.get("bookValue")
-        fcf = info.get("freeCashflow")
-        shares = info.get("sharesOutstanding")
-        sector = info.get("sector")
+            if price and eps:
+                target = eps * 20
+                upside = (target - price) / price * 100
 
-        peer_pes = []
-        peer_pbs = []
+                rec = "BUY" if upside > 15 else "SELL" if upside < -15 else "HOLD"
 
-        for p in stock_map.values():
-            p_info = get_info(p)
+                results.append({
+                    "Stock": t,
+                    "Price": price,
+                    "Target": target,
+                    "Upside %": upside,
+                    "Recommendation": rec
+                })
+        except:
+            continue
 
-            if p_info.get("sector") == sector and p != t:
-                p_price = p_info.get("currentPrice")
-                p_eps = p_info.get("trailingEps")
-                p_book = p_info.get("bookValue")
-
-                if p_price and p_eps:
-                    peer_pes.append(p_price / p_eps)
-
-                if p_price and p_book:
-                    peer_pbs.append(p_price / p_book)
-
-        avg_pe = sum(peer_pes)/len(peer_pes) if peer_pes else None
-        avg_pb = sum(peer_pbs)/len(peer_pbs) if peer_pbs else None
-
-        rel_vals = []
-
-        if eps and avg_pe:
-            rel_vals.append(eps * avg_pe)
-
-        if book and avg_pb:
-            rel_vals.append(book * avg_pb)
-
-        relative_value = sum(rel_vals)/len(rel_vals) if rel_vals else None
-
-        dcf_value = None
-        if fcf and shares:
-            growth = 0.06
-            discount = 0.10
-            terminal_growth = 0.03
-
-            future_fcf = fcf * (1 + growth)**5
-            terminal_value = future_fcf * (1 + terminal_growth) / (discount - terminal_growth)
-
-            dcf_total = (future_fcf / (discount**5)) + (terminal_value / (discount**5))
-            dcf_value = dcf_total / shares
-
-        vals = []
-
-        if dcf_value:
-            vals.append(dcf_value * 0.5)
-
-        if relative_value:
-            vals.append(relative_value * 0.5)
-
-        if vals and price:
-            target = sum(vals)
-            upside = (target - price) / price * 100
-
-            upside = max(min(upside, 80), -50)
-
-            if upside > 15:
-                rec = "BUY"
-            elif upside < -15:
-                rec = "SELL"
-            else:
-                rec = "HOLD"
-
-            results.append({
-                "Stock": t,
-                "Price": round(price,2),
-                "Target": round(target,2),
-                "Upside %": round(upside,2),
-                "Recommendation": rec
-            })
-
-    df_val = pd.DataFrame(results)
-
-    if not df_val.empty:
-        df_val = df_val.sort_values(by="Upside %", ascending=False)
-        st.dataframe(df_val)
-
-        top = df_val.iloc[0]
-        st.success(f"🏆 Top Pick: {top['Stock']} ({top['Upside %']}%)")
-
-    st.download_button("📥 Download Valuation", to_excel(df_val), "valuation.xlsx")
+    st.dataframe(pd.DataFrame(results))
