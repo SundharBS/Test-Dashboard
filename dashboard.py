@@ -193,4 +193,4 @@ with tab2:
             "📥 Download Profit Margin",
             to_excel(margin_df),
             file_name="margin_trend.xlsx"
-        )
+        )x
