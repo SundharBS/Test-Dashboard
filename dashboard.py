@@ -50,15 +50,37 @@ with tab1:
     start = col1.date_input("Start Date", pd.to_datetime("2022-01-01"))
     end = col2.date_input("End Date", pd.to_datetime("today"))
 
+    # 🔥 FIXED LIVE PRICE (NSE + YAHOO)
     st.subheader("Live Price")
 
-    for stock in selected_stocks:
-        try:
-            price = nse_eq(stock)["priceInfo"]["lastPrice"]
-            st.write(f"{stock}: ₹{price}")
-        except:
-            st.write(f"{stock}: N/A")
+    cols = st.columns(len(selected_stocks))
 
+    for i, stock in enumerate(selected_stocks):
+        price = None
+
+        # ===== NSE FIRST =====
+        try:
+            data = nse_eq(stock)
+            price = data["priceInfo"]["lastPrice"]
+        except:
+            price = None
+
+        # ===== FALLBACK YAHOO =====
+        if price is None:
+            try:
+                yf_data = yf.download(stock + ".NS", period="1d", interval="1m")
+                if not yf_data.empty:
+                    price = float(yf_data["Close"].dropna().iloc[-1])
+            except:
+                price = None
+
+        # ===== DISPLAY =====
+        if price:
+            cols[i].metric(stock, f"₹{round(price,2)}")
+        else:
+            cols[i].metric(stock, "N/A")
+
+    # ---------- PRICE TREND ----------
     st.subheader("Historical Price Trend")
 
     price_df = pd.DataFrame()
@@ -70,7 +92,7 @@ with tab1:
             if data.empty:
                 data = yf.download(stock + ".NS", period="1y")
 
-            if not data.empty and "Close" in data.columns:
+            if not data.empty:
                 series = data["Close"].dropna()
                 series.name = stock
                 price_df = pd.concat([price_df, series], axis=1)
@@ -81,7 +103,7 @@ with tab1:
     if not price_df.empty:
         st.line_chart(price_df)
     else:
-        st.warning("No valid price data available")
+        st.warning("No valid price data")
 
 # =========================
 # TAB 2 — COMPARABLES
@@ -153,9 +175,7 @@ with tab2:
         st.line_chart(roe_df)
         st.download_button("📥 Download ROE", to_excel(roe_df), "roe.csv")
 
-    # =========================
-    # 🔥 FINAL P/B (NEVER EMPTY)
-    # =========================
+    # ---------- P/B ----------
     st.subheader("P/B Trend")
 
     pb_df = pd.DataFrame()
@@ -164,7 +184,6 @@ with tab2:
         try:
             data = df[df["Symbol"] == s].copy()
 
-            # ----- DATASET METHOD -----
             if not data.empty:
                 data["Shares"] = data["Shares"].replace(0, pd.NA)
                 data["Shares"] = data["Shares"].ffill()
@@ -196,7 +215,6 @@ with tab2:
                             pb_df = pd.concat([pb_df, temp], axis=1)
                             continue
 
-            # ----- FALLBACK (REAL YAHOO PB) -----
             ticker = yf.Ticker(s + ".NS")
             pb_live = ticker.info.get("priceToBook")
 
@@ -207,32 +225,14 @@ with tab2:
                 temp = pd.DataFrame({s: values}, index=years)
                 pb_df = pd.concat([pb_df, temp], axis=1)
 
-        except Exception as e:
-            st.write(f"{s} error:", e)
+        except:
+            continue
 
     if not pb_df.empty:
-        pb_df = pb_df.sort_index()
         st.line_chart(pb_df)
         st.download_button("📥 Download P/B", to_excel(pb_df), "pb.csv")
     else:
-        st.error("❌ No P/B data available")
-
-    # ---------- MARGIN ----------
-    st.subheader("Profit Margin Trend")
-
-    margin_df = pd.DataFrame()
-
-    for s in selected_stocks:
-        data = df[df["Symbol"] == s]
-        if not data.empty:
-            series = data["NetIncome"] / data["Revenue"]
-            series.index = data["Year"]
-            series.name = s
-            margin_df = pd.concat([margin_df, series], axis=1)
-
-    if not margin_df.empty:
-        st.line_chart(margin_df)
-        st.download_button("📥 Download Margin", to_excel(margin_df), "margin.csv")
+        st.error("❌ No P/B data")
 
 # =========================
 # TAB 3 — BENCHMARK
@@ -272,7 +272,15 @@ with tab4:
             ticker = yf.Ticker(stock + ".NS")
             info = ticker.info
 
-            price = nse_eq(stock)["priceInfo"]["lastPrice"]
+            price = None
+
+            try:
+                price = nse_eq(stock)["priceInfo"]["lastPrice"]
+            except:
+                yf_data = yf.download(stock + ".NS", period="1d")
+                if not yf_data.empty:
+                    price = float(yf_data["Close"].iloc[-1])
+
             eps = info.get("trailingEps")
 
             if price and eps:
