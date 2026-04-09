@@ -26,11 +26,9 @@ def load_data():
 
     return df
 
+# 🔥 FIXED EXPORT FUNCTION (NO XLSXWRITER)
 def to_excel(df):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer)
-    return output.getvalue()
+    return df.to_csv(index=True).encode("utf-8")
 
 df = load_data()
 stocks = sorted(df["Symbol"].unique())
@@ -69,13 +67,11 @@ with tab1:
         try:
             data = yf.download(stock + ".NS", start=start, end=end)
 
-            # 🔥 FIX: fallback if empty
             if data.empty:
                 data = yf.download(stock + ".NS", period="1y")
 
             if not data.empty and "Close" in data.columns:
                 series = data["Close"].dropna()
-
                 if not series.empty:
                     series.name = stock
                     price_df = pd.concat([price_df, series], axis=1)
@@ -86,10 +82,10 @@ with tab1:
     if not price_df.empty:
         st.line_chart(price_df)
     else:
-        st.warning("No valid price data available (Yahoo returned empty)")
+        st.warning("No valid price data available")
 
 # =========================
-# TAB 2 — COMPARABLES (UNCHANGED + DOWNLOADS)
+# TAB 2 — COMPARABLES
 # =========================
 with tab2:
 
@@ -126,7 +122,7 @@ with tab2:
     comp_df = pd.DataFrame(rows)
     st.dataframe(comp_df)
 
-    st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.xlsx")
+    st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -141,7 +137,7 @@ with tab2:
 
     if not rev_df.empty:
         st.line_chart(rev_df)
-        st.download_button("📥 Download Revenue", to_excel(rev_df), "revenue.xlsx")
+        st.download_button("📥 Download Revenue", to_excel(rev_df), "revenue.csv")
 
     # ---------- ROE ----------
     st.subheader("ROE Trend")
@@ -157,7 +153,7 @@ with tab2:
 
     if not roe_df.empty:
         st.line_chart(roe_df)
-        st.download_button("📥 Download ROE", to_excel(roe_df), "roe.xlsx")
+        st.download_button("📥 Download ROE", to_excel(roe_df), "roe.csv")
 
     # ---------- P/B ----------
     st.subheader("P/B Trend")
@@ -197,7 +193,7 @@ with tab2:
 
     if not pb_df.empty:
         st.line_chart(pb_df)
-        st.download_button("📥 Download P/B", to_excel(pb_df), "pb.xlsx")
+        st.download_button("📥 Download P/B", to_excel(pb_df), "pb.csv")
     else:
         st.error("❌ No P/B data")
 
