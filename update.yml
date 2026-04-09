@@ -1,0 +1,41 @@
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
+
+# Load tickers
+tickers = pd.read_csv("financial_dataset.csv")["Symbol"].unique()
+
+data_list = []
+current_year = datetime.now().year
+
+for ticker in tickers:
+    try:
+        stock = yf.Ticker(ticker + ".NS")
+        info = stock.info
+
+        data_list.append({
+            "Symbol": ticker,
+            "Year": current_year,
+            "Revenue": info.get("totalRevenue"),
+            "NetIncome": info.get("netIncomeToCommon"),
+            "Equity": info.get("totalStockholderEquity"),
+            "Shares": info.get("sharesOutstanding")
+        })
+
+    except:
+        continue
+
+new_df = pd.DataFrame(data_list)
+
+# Merge with existing dataset
+try:
+    old_df = pd.read_csv("financial_dataset.csv")
+    final_df = pd.concat([old_df, new_df]).drop_duplicates(
+        subset=["Symbol", "Year"], keep="last"
+    )
+except:
+    final_df = new_df
+
+final_df.to_csv("financial_dataset.csv", index=False)
+
+print("✅ Dataset updated")
