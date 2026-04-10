@@ -2,13 +2,12 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import yfinance as yf
-from nsepython import nse_eq
 
 st.set_page_config(layout="wide")
 st.title("📊 Investment Banking Dashboard")
 
 # 🔄 AUTO REFRESH
-st_autorefresh(interval=15000, key="refresh")
+st_autorefresh(interval=30000, key="refresh")
 
 # ---------- LOAD DATA ----------
 @st.cache_data(ttl=86400)
@@ -26,16 +25,46 @@ def load_data():
 
     return df
 
+# ---------- LIVE PRICE ----------
+@st.cache_data(ttl=60)
+def get_live_prices_bulk(stocks):
+    prices = {}
+
+    for stock in stocks:
+        try:
+            ticker = yf.Ticker(stock + ".NS")
+            hist = ticker.history(period="1d")
+
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
+            else:
+                price = None
+        except:
+            price = None
+
+        prices[stock] = price
+
+    return prices
+
 # ---------- EXPORT ----------
 def to_excel(df):
     return df.to_csv(index=True).encode("utf-8")
 
 df = load_data()
-stocks = sorted(df["Symbol"].unique())
+
+if "Symbol" not in df.columns:
+    st.error("❌ 'Symbol' column missing")
+    st.stop()
+
+stocks = sorted(df["Symbol"].dropna().unique())
 
 selected_stocks = st.multiselect("🔍 Search Stocks", stocks)
+
 if not selected_stocks:
     selected_stocks = [stocks[0]]
+
+# 🔥 LIVE PRICES
+live_prices = get_live_prices_bulk(selected_stocks)
 
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📊 Overview", "📊 Comparables", "📊 Benchmark", "📊 Valuation"]
@@ -50,32 +79,13 @@ with tab1:
     start = col1.date_input("Start Date", pd.to_datetime("2022-01-01"))
     end = col2.date_input("End Date", pd.to_datetime("today"))
 
-    # 🔥 FIXED LIVE PRICE (NSE + YAHOO)
     st.subheader("Live Price")
-
     cols = st.columns(len(selected_stocks))
 
     for i, stock in enumerate(selected_stocks):
-        price = None
+        price = live_prices.get(stock)
 
-        # ===== NSE FIRST =====
-        try:
-            data = nse_eq(stock)
-            price = data["priceInfo"]["lastPrice"]
-        except:
-            price = None
-
-        # ===== FALLBACK YAHOO =====
-        if price is None:
-            try:
-                yf_data = yf.download(stock + ".NS", period="1d", interval="1m")
-                if not yf_data.empty:
-                    price = float(yf_data["Close"].dropna().iloc[-1])
-            except:
-                price = None
-
-        # ===== DISPLAY =====
-        if price:
+        if price is not None:
             cols[i].metric(stock, f"₹{round(price,2)}")
         else:
             cols[i].metric(stock, "N/A")
@@ -126,23 +136,34 @@ with tab2:
             roa = None
 
             if not data.empty:
-                roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
-                roa = (data["NetIncome"].values[0] / data["Revenue"].values[0]) * 100
+                try:
+                    roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
+                except:
+                    pass
+
+                try:
+                    roa = (data["NetIncome"].values[0] / data["Revenue"].values[0]) * 100
+                except:
+                    pass
 
             rows.append({
                 "Stock": stock,
                 "P/E": info.get("trailingPE"),
                 "P/B": info.get("priceToBook"),
-                "ROE %": round(roe, 2) if roe else None,
-                "ROA %": round(roa, 2) if roa else None
+                "ROE %": round(roe, 2) if roe is not None else None,
+                "ROA %": round(roa, 2) if roa is not None else None
             })
 
         except:
             continue
 
     comp_df = pd.DataFrame(rows)
-    st.dataframe(comp_df)
-    st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
+
+    if not comp_df.empty:
+        st.dataframe(comp_df)
+        st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
+    else:
+        st.warning("No comparables data available")
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -164,20 +185,26 @@ with tab2:
     roe_df = pd.DataFrame()
 
     for s in selected_stocks:
-        data = df[df["Symbol"] == s]
+        data = df[df["Symbol"] == s].copy()
+
         if not data.empty:
-            series = data["NetIncome"] / data["Equity"]
-            series.index = data["Year"]
-            series.name = s
-            roe_df = pd.concat([roe_df, series], axis=1)
+            data = data.dropna(subset=["NetIncome", "Equity"])
+            data = data[data["Equity"] != 0]
+
+            if not data.empty:
+                data["ROE"] = (data["NetIncome"] / data["Equity"]) * 100
+                series = data.set_index("Year")["ROE"]
+                series.name = s
+                roe_df = pd.concat([roe_df, series], axis=1)
 
     if not roe_df.empty:
         st.line_chart(roe_df)
         st.download_button("📥 Download ROE", to_excel(roe_df), "roe.csv")
+    else:
+        st.warning("No ROE data available")
 
     # ---------- P/B ----------
     st.subheader("P/B Trend")
-
     pb_df = pd.DataFrame()
 
     for s in selected_stocks:
@@ -185,45 +212,20 @@ with tab2:
             data = df[df["Symbol"] == s].copy()
 
             if not data.empty:
-                data["Shares"] = data["Shares"].replace(0, pd.NA)
-                data["Shares"] = data["Shares"].ffill()
-                data["BVPS"] = data["Equity"] / data["Shares"]
-
-                data = data.dropna(subset=["BVPS"])
+                data = data.dropna(subset=["Equity", "Shares"])
+                data = data[data["Shares"] != 0]
 
                 if not data.empty:
-                    price = yf.download(s + ".NS", period="5y")["Close"]
+                    data["BVPS"] = data["Equity"] / data["Shares"]
 
-                    if isinstance(price, pd.Series) and not price.empty:
-                        pb_series = []
+                    price = live_prices.get(s)
 
-                        for _, row in data.iterrows():
-                            year = int(row["Year"])
-                            bvps = float(row["BVPS"])
+                    if price is not None:
+                        data["PB"] = price / data["BVPS"]
 
-                            if bvps <= 0:
-                                continue
-
-                            price_val = float(price.iloc[-1])
-                            pb_val = price_val / bvps
-
-                            if pb_val > 0:
-                                pb_series.append((year, pb_val))
-
-                        if pb_series:
-                            temp = pd.DataFrame(pb_series, columns=["Year", s]).set_index("Year")
-                            pb_df = pd.concat([pb_df, temp], axis=1)
-                            continue
-
-            ticker = yf.Ticker(s + ".NS")
-            pb_live = ticker.info.get("priceToBook")
-
-            if pb_live and pb_live > 0:
-                years = [2021, 2022, 2023, 2024, 2025]
-                values = [pb_live] * len(years)
-
-                temp = pd.DataFrame({s: values}, index=years)
-                pb_df = pd.concat([pb_df, temp], axis=1)
+                        series = data.set_index("Year")["PB"]
+                        series.name = s
+                        pb_df = pd.concat([pb_df, series], axis=1)
 
         except:
             continue
@@ -232,7 +234,7 @@ with tab2:
         st.line_chart(pb_df)
         st.download_button("📥 Download P/B", to_excel(pb_df), "pb.csv")
     else:
-        st.error("❌ No P/B data")
+        st.warning("No P/B data available")
 
 # =========================
 # TAB 3 — BENCHMARK
@@ -241,19 +243,24 @@ with tab3:
 
     rows = []
 
+    try:
+        nifty_hist = yf.download("^NSEI", period="1y")["Close"]
+    except:
+        nifty_hist = None
+
     for stock in selected_stocks:
         try:
             stock_hist = yf.download(stock + ".NS", period="1y")["Close"]
-            nifty_hist = yf.download("^NSEI", period="1y")["Close"]
 
-            stock_return = (stock_hist.iloc[-1] / stock_hist.iloc[0] - 1) * 100
-            nifty_return = (nifty_hist.iloc[-1] / nifty_hist.iloc[0] - 1) * 100
+            if nifty_hist is not None:
+                stock_return = (stock_hist.iloc[-1] / stock_hist.iloc[0] - 1) * 100
+                nifty_return = (nifty_hist.iloc[-1] / nifty_hist.iloc[0] - 1) * 100
 
-            rows.append({
-                "Stock": stock,
-                "Stock Return %": round(stock_return, 2),
-                "Benchmark %": round(nifty_return, 2)
-            })
+                rows.append({
+                    "Stock": stock,
+                    "Stock Return %": round(stock_return, 2),
+                    "Benchmark %": round(nifty_return, 2)
+                })
 
         except:
             continue
@@ -272,18 +279,10 @@ with tab4:
             ticker = yf.Ticker(stock + ".NS")
             info = ticker.info
 
-            price = None
-
-            try:
-                price = nse_eq(stock)["priceInfo"]["lastPrice"]
-            except:
-                yf_data = yf.download(stock + ".NS", period="1d")
-                if not yf_data.empty:
-                    price = float(yf_data["Close"].iloc[-1])
-
+            price = live_prices.get(stock)
             eps = info.get("trailingEps")
 
-            if price and eps:
+            if price is not None and eps:
                 intrinsic = eps * 20
                 upside = ((intrinsic - price) / price) * 100
 
