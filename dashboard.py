@@ -29,22 +29,19 @@ def load_data():
 @st.cache_data(ttl=60)
 def get_live_prices_bulk(stocks):
     prices = {}
-
     for stock in stocks:
         try:
             ticker = yf.Ticker(stock + ".NS")
             hist = ticker.history(period="1d")
-
-            if not hist.empty:
-                price = float(hist["Close"].iloc[-1])
-            else:
-                price = None
+            prices[stock] = float(hist["Close"].iloc[-1]) if not hist.empty else None
         except:
-            price = None
-
-        prices[stock] = price
-
+            prices[stock] = None
     return prices
+
+# ---------- PRICE HISTORY ----------
+@st.cache_data(ttl=3600)
+def get_price_history(symbol):
+    return yf.Ticker(symbol + ".NS").history(period="10y")
 
 # ---------- CAGR ----------
 def calculate_cagr(series):
@@ -55,10 +52,8 @@ def calculate_cagr(series):
         start = series.iloc[0]
         end = series.iloc[-1]
         n = len(series) - 1
-
         if start <= 0 or end <= 0:
             return None
-
         return ((end / start) ** (1 / n) - 1) * 100
     except:
         return None
@@ -67,7 +62,6 @@ def calculate_cagr(series):
 def calculate_dcf(net_income_series, growth_rate=0.1, discount_rate=0.12):
     try:
         net_income_series = net_income_series.dropna()
-
         if len(net_income_series) == 0:
             return None
 
@@ -89,14 +83,9 @@ def to_excel(df):
 
 df = load_data()
 
-if "Symbol" not in df.columns:
-    st.error("❌ 'Symbol' column missing")
-    st.stop()
-
 stocks = sorted(df["Symbol"].dropna().unique())
 
 selected_stocks = st.multiselect("🔍 Search Stocks", stocks)
-
 if not selected_stocks:
     selected_stocks = [stocks[0]]
 
@@ -111,41 +100,42 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # =========================
 with tab1:
 
-    col1, col2 = st.columns(2)
-    start = col1.date_input("Start Date", pd.to_datetime("2022-01-01"))
-    end = col2.date_input("End Date", pd.to_datetime("today"))
-
     st.subheader("Live Price")
     cols = st.columns(len(selected_stocks))
 
     for i, stock in enumerate(selected_stocks):
         price = live_prices.get(stock)
-        if price is not None:
-            cols[i].metric(stock, f"₹{round(price,2)}")
-        else:
-            cols[i].metric(stock, "N/A")
+        cols[i].metric(stock, f"₹{round(price,2)}" if price else "N/A")
 
+    # ---------- HISTORICAL PRICE (FIXED) ----------
     st.subheader("Historical Price Trend")
+
+    col1, col2 = st.columns(2)
+    start = col1.date_input("Start Date", pd.to_datetime("2022-01-01"))
+    end = col2.date_input("End Date", pd.to_datetime("today"))
 
     price_df = pd.DataFrame()
 
     for stock in selected_stocks:
         try:
             data = yf.download(stock + ".NS", start=start, end=end)
+
             if data.empty:
                 data = yf.download(stock + ".NS", period="1y")
 
             if not data.empty:
                 series = data["Close"].dropna()
-                series.name = stock
+                series.name = str(stock)
                 price_df = pd.concat([price_df, series], axis=1)
+
         except:
             continue
 
     if not price_df.empty:
+        price_df = price_df.apply(pd.to_numeric, errors="coerce")
         st.line_chart(price_df)
     else:
-        st.warning("No valid price data")
+        st.warning("⚠️ No price data available")
 
 # =========================
 # TAB 2 — COMPARABLES
@@ -165,29 +155,20 @@ with tab2:
             data = df[(df["Symbol"] == stock) & (df["Year"] == latest_year)]
 
             roe = None
-            roa = None
-
-            if not data.empty:
-                if data["Equity"].values[0] != 0:
-                    roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
-
-                if data["Revenue"].values[0] != 0:
-                    roa = (data["NetIncome"].values[0] / data["Revenue"].values[0]) * 100
+            if not data.empty and data["Equity"].values[0] != 0:
+                roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
 
             rows.append({
                 "Stock": stock,
                 "P/E": info.get("trailingPE"),
                 "P/B": info.get("priceToBook"),
-                "ROE %": round(roe, 2) if roe is not None else None,
-                "ROA %": round(roa, 2) if roa is not None else None
+                "ROE %": round(roe, 2) if roe else None
             })
 
         except:
             continue
 
-    comp_df = pd.DataFrame(rows)
-    st.dataframe(comp_df)
-    st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
+    st.dataframe(pd.DataFrame(rows))
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -202,7 +183,6 @@ with tab2:
 
     if not rev_df.empty:
         st.line_chart(rev_df)
-        st.download_button("📥 Download Revenue", to_excel(rev_df), "revenue.csv")
 
     # ---------- ROE ----------
     st.subheader("ROE Trend")
@@ -210,7 +190,6 @@ with tab2:
 
     for s in selected_stocks:
         data = df[df["Symbol"] == s].copy()
-        data = data.dropna(subset=["NetIncome", "Equity"])
         data = data[data["Equity"] != 0]
 
         if not data.empty:
@@ -221,10 +200,10 @@ with tab2:
 
     if not roe_df.empty:
         st.line_chart(roe_df)
-        st.download_button("📥 Download ROE", to_excel(roe_df), "roe.csv")
 
-    # ---------- P/B ----------
-    st.subheader("P/B Trend (Improved)")
+    # ---------- P/B (HYBRID FINAL) ----------
+    st.subheader("P/B Trend")
+
     pb_df = pd.DataFrame()
 
     for s in selected_stocks:
@@ -233,60 +212,39 @@ with tab2:
             data = data.dropna(subset=["Equity", "Shares"])
             data = data[data["Shares"] != 0]
 
-            if not data.empty:
-                data["BVPS"] = data["Equity"] / data["Shares"]
-                price_data = yf.download(s + ".NS", period="5y")["Close"]
+            if data.empty:
+                continue
 
-                pb_list = []
+            data["BVPS"] = data["Equity"] / data["Shares"]
 
-                for _, row in data.iterrows():
-                    year = int(row["Year"])
-                    bvps = row["BVPS"]
+            hist = get_price_history(s)
+            if hist.empty:
+                continue
 
-                    if bvps <= 0:
-                        continue
+            hist = hist.reset_index()
+            hist["Year"] = hist["Date"].dt.year
 
-                    yearly_price = price_data[price_data.index.year == year]
+            yearly_price = hist.groupby("Year")["Close"].last().reset_index()
 
-                    if not yearly_price.empty:
-                        price_val = yearly_price.iloc[-1]
-                        pb_val = price_val / bvps
-                        pb_list.append((year, pb_val))
+            merged = pd.merge(data, yearly_price, on="Year", how="inner")
 
-                if pb_list:
-                    temp = pd.DataFrame(pb_list, columns=["Year", "PB"]).set_index("Year")
-                    temp.columns = [str(s)]  # FIXED COLUMN NAME
-                    pb_df = pd.concat([pb_df, temp], axis=1)
+            if merged.empty:
+                continue
+
+            merged["PB"] = merged["Close"] / merged["BVPS"]
+
+            series = merged.set_index("Year")["PB"]
+            series.name = str(s)
+
+            pb_df = pd.concat([pb_df, series], axis=1)
 
         except:
             continue
 
     if not pb_df.empty:
-        pb_df.columns = [str(col) for col in pb_df.columns]
-        pb_df = pb_df.apply(pd.to_numeric, errors="coerce")
-
         st.line_chart(pb_df)
-        st.download_button("📥 Download P/B", to_excel(pb_df), "pb.csv")
-
-    # ---------- CAGR ----------
-    st.subheader("Growth Metrics (CAGR)")
-
-    growth_rows = []
-
-    for s in selected_stocks:
-        data = df[df["Symbol"] == s]
-
-        if not data.empty:
-            rev_cagr = calculate_cagr(data["Revenue"])
-            profit_cagr = calculate_cagr(data["NetIncome"])
-
-            growth_rows.append({
-                "Stock": s,
-                "Revenue CAGR %": round(rev_cagr, 2) if rev_cagr else None,
-                "Profit CAGR %": round(profit_cagr, 2) if profit_cagr else None
-            })
-
-    st.dataframe(pd.DataFrame(growth_rows))
+    else:
+        st.warning("⚠️ No P/B data available")
 
 # =========================
 # TAB 3 — BENCHMARK
@@ -320,7 +278,7 @@ with tab3:
     st.dataframe(pd.DataFrame(rows))
 
 # =========================
-# TAB 4 — VALUATION (FINAL FIX)
+# TAB 4 — VALUATION
 # =========================
 with tab4:
 
@@ -331,7 +289,6 @@ with tab4:
     for stock in selected_stocks:
         try:
             data = df[df["Symbol"] == stock]
-
             if data.empty:
                 continue
 
@@ -377,4 +334,4 @@ with tab4:
     if rows:
         st.dataframe(pd.DataFrame(rows))
     else:
-        st.warning("⚠️ Valuation data not available")
+        st.warning("⚠️ No valuation data available")
