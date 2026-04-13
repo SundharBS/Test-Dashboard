@@ -46,6 +46,43 @@ def get_live_prices_bulk(stocks):
 
     return prices
 
+# ---------- CAGR ----------
+def calculate_cagr(series):
+    try:
+        series = series.dropna()
+        if len(series) < 2:
+            return None
+        start = series.iloc[0]
+        end = series.iloc[-1]
+        n = len(series) - 1
+
+        if start <= 0 or end <= 0:
+            return None
+
+        return ((end / start) ** (1 / n) - 1) * 100
+    except:
+        return None
+
+# ---------- DCF ----------
+def calculate_dcf(net_income_series, growth_rate=0.1, discount_rate=0.12):
+    try:
+        net_income_series = net_income_series.dropna()
+
+        if len(net_income_series) == 0:
+            return None
+
+        last_cashflow = net_income_series.iloc[-1]
+
+        value = 0
+        for t in range(1, 6):
+            future_cf = last_cashflow * ((1 + growth_rate) ** t)
+            discounted = future_cf / ((1 + discount_rate) ** t)
+            value += discounted
+
+        return value
+    except:
+        return None
+
 # ---------- EXPORT ----------
 def to_excel(df):
     return df.to_csv(index=True).encode("utf-8")
@@ -63,7 +100,6 @@ selected_stocks = st.multiselect("🔍 Search Stocks", stocks)
 if not selected_stocks:
     selected_stocks = [stocks[0]]
 
-# 🔥 LIVE PRICES
 live_prices = get_live_prices_bulk(selected_stocks)
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -84,13 +120,11 @@ with tab1:
 
     for i, stock in enumerate(selected_stocks):
         price = live_prices.get(stock)
-
         if price is not None:
             cols[i].metric(stock, f"₹{round(price,2)}")
         else:
             cols[i].metric(stock, "N/A")
 
-    # ---------- PRICE TREND ----------
     st.subheader("Historical Price Trend")
 
     price_df = pd.DataFrame()
@@ -98,7 +132,6 @@ with tab1:
     for stock in selected_stocks:
         try:
             data = yf.download(stock + ".NS", start=start, end=end)
-
             if data.empty:
                 data = yf.download(stock + ".NS", period="1y")
 
@@ -106,7 +139,6 @@ with tab1:
                 series = data["Close"].dropna()
                 series.name = stock
                 price_df = pd.concat([price_df, series], axis=1)
-
         except:
             continue
 
@@ -136,15 +168,11 @@ with tab2:
             roa = None
 
             if not data.empty:
-                try:
+                if data["Equity"].values[0] != 0:
                     roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
-                except:
-                    pass
 
-                try:
+                if data["Revenue"].values[0] != 0:
                     roa = (data["NetIncome"].values[0] / data["Revenue"].values[0]) * 100
-                except:
-                    pass
 
             rows.append({
                 "Stock": stock,
@@ -158,12 +186,8 @@ with tab2:
             continue
 
     comp_df = pd.DataFrame(rows)
-
-    if not comp_df.empty:
-        st.dataframe(comp_df)
-        st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
-    else:
-        st.warning("No comparables data available")
+    st.dataframe(comp_df)
+    st.download_button("📥 Download Comparables", to_excel(comp_df), "comparables.csv")
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -186,55 +210,83 @@ with tab2:
 
     for s in selected_stocks:
         data = df[df["Symbol"] == s].copy()
+        data = data.dropna(subset=["NetIncome", "Equity"])
+        data = data[data["Equity"] != 0]
 
         if not data.empty:
-            data = data.dropna(subset=["NetIncome", "Equity"])
-            data = data[data["Equity"] != 0]
-
-            if not data.empty:
-                data["ROE"] = (data["NetIncome"] / data["Equity"]) * 100
-                series = data.set_index("Year")["ROE"]
-                series.name = s
-                roe_df = pd.concat([roe_df, series], axis=1)
+            data["ROE"] = (data["NetIncome"] / data["Equity"]) * 100
+            series = data.set_index("Year")["ROE"]
+            series.name = s
+            roe_df = pd.concat([roe_df, series], axis=1)
 
     if not roe_df.empty:
         st.line_chart(roe_df)
         st.download_button("📥 Download ROE", to_excel(roe_df), "roe.csv")
-    else:
-        st.warning("No ROE data available")
 
     # ---------- P/B ----------
-    st.subheader("P/B Trend")
+    st.subheader("P/B Trend (Improved)")
     pb_df = pd.DataFrame()
 
     for s in selected_stocks:
         try:
             data = df[df["Symbol"] == s].copy()
+            data = data.dropna(subset=["Equity", "Shares"])
+            data = data[data["Shares"] != 0]
 
             if not data.empty:
-                data = data.dropna(subset=["Equity", "Shares"])
-                data = data[data["Shares"] != 0]
+                data["BVPS"] = data["Equity"] / data["Shares"]
+                price_data = yf.download(s + ".NS", period="5y")["Close"]
 
-                if not data.empty:
-                    data["BVPS"] = data["Equity"] / data["Shares"]
+                pb_list = []
 
-                    price = live_prices.get(s)
+                for _, row in data.iterrows():
+                    year = int(row["Year"])
+                    bvps = row["BVPS"]
 
-                    if price is not None:
-                        data["PB"] = price / data["BVPS"]
+                    if bvps <= 0:
+                        continue
 
-                        series = data.set_index("Year")["PB"]
-                        series.name = s
-                        pb_df = pd.concat([pb_df, series], axis=1)
+                    yearly_price = price_data[price_data.index.year == year]
+
+                    if not yearly_price.empty:
+                        price_val = yearly_price.iloc[-1]
+                        pb_val = price_val / bvps
+                        pb_list.append((year, pb_val))
+
+                if pb_list:
+                    temp = pd.DataFrame(pb_list, columns=["Year", "PB"]).set_index("Year")
+                    temp.columns = [str(s)]  # FIXED COLUMN NAME
+                    pb_df = pd.concat([pb_df, temp], axis=1)
 
         except:
             continue
 
     if not pb_df.empty:
+        pb_df.columns = [str(col) for col in pb_df.columns]
+        pb_df = pb_df.apply(pd.to_numeric, errors="coerce")
+
         st.line_chart(pb_df)
         st.download_button("📥 Download P/B", to_excel(pb_df), "pb.csv")
-    else:
-        st.warning("No P/B data available")
+
+    # ---------- CAGR ----------
+    st.subheader("Growth Metrics (CAGR)")
+
+    growth_rows = []
+
+    for s in selected_stocks:
+        data = df[df["Symbol"] == s]
+
+        if not data.empty:
+            rev_cagr = calculate_cagr(data["Revenue"])
+            profit_cagr = calculate_cagr(data["NetIncome"])
+
+            growth_rows.append({
+                "Stock": s,
+                "Revenue CAGR %": round(rev_cagr, 2) if rev_cagr else None,
+                "Profit CAGR %": round(profit_cagr, 2) if profit_cagr else None
+            })
+
+    st.dataframe(pd.DataFrame(growth_rows))
 
 # =========================
 # TAB 3 — BENCHMARK
@@ -268,39 +320,61 @@ with tab3:
     st.dataframe(pd.DataFrame(rows))
 
 # =========================
-# TAB 4 — VALUATION
+# TAB 4 — VALUATION (FINAL FIX)
 # =========================
 with tab4:
+
+    st.subheader("DCF Valuation")
 
     rows = []
 
     for stock in selected_stocks:
         try:
-            ticker = yf.Ticker(stock + ".NS")
-            info = ticker.info
+            data = df[df["Symbol"] == stock]
+
+            if data.empty:
+                continue
 
             price = live_prices.get(stock)
-            eps = info.get("trailingEps")
 
-            if price is not None and eps:
-                intrinsic = eps * 20
-                upside = ((intrinsic - price) / price) * 100
+            growth = calculate_cagr(data["NetIncome"])
+            if growth is None:
+                growth = 10
+            growth = growth / 100
 
-                rec = "HOLD"
-                if upside > 15:
-                    rec = "BUY"
-                elif upside < -15:
-                    rec = "SELL"
+            intrinsic = calculate_dcf(data["NetIncome"], growth)
+
+            if intrinsic is None:
+                last_income = data["NetIncome"].dropna()
+                if not last_income.empty:
+                    intrinsic = last_income.iloc[-1] * 10
+
+            if intrinsic is not None:
+
+                if price is not None:
+                    upside = ((intrinsic - price) / price) * 100
+
+                    rec = "HOLD"
+                    if upside > 20:
+                        rec = "BUY"
+                    elif upside < -20:
+                        rec = "SELL"
+                else:
+                    upside = None
+                    rec = "N/A"
 
                 rows.append({
                     "Stock": stock,
-                    "Price": price,
-                    "Intrinsic Value": intrinsic,
-                    "Upside %": round(upside, 2),
+                    "Price": round(price, 2) if price else None,
+                    "DCF Value": round(intrinsic, 2),
+                    "Upside %": round(upside, 2) if upside else None,
                     "Recommendation": rec
                 })
 
         except:
             continue
 
-    st.dataframe(pd.DataFrame(rows))
+    if rows:
+        st.dataframe(pd.DataFrame(rows))
+    else:
+        st.warning("⚠️ Valuation data not available")
