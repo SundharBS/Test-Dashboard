@@ -107,7 +107,7 @@ with tab1:
         price = live_prices.get(stock)
         cols[i].metric(stock, f"₹{round(price,2)}" if price else "N/A")
 
-    # ---------- HISTORICAL PRICE (FIXED) ----------
+    # ---------- HISTORICAL PRICE ----------
     st.subheader("Historical Price Trend")
 
     col1, col2 = st.columns(2)
@@ -132,27 +132,35 @@ with tab1:
             continue
 
     if not price_df.empty:
-        price_df = price_df.apply(pd.to_numeric, errors="coerce")
         st.line_chart(price_df)
     else:
         st.warning("⚠️ No price data available")
 
 # =========================
-# TAB 2 — COMPARABLES
+# TAB 2 — COMPARABLES (FIXED)
 # =========================
 with tab2:
 
     st.subheader("Live Comparables")
 
     rows = []
-    latest_year = df["Year"].max()
 
     for stock in selected_stocks:
         try:
             ticker = yf.Ticker(stock + ".NS")
-            info = ticker.info
 
-            data = df[(df["Symbol"] == stock) & (df["Year"] == latest_year)]
+            # safer live price
+            hist = ticker.history(period="1d")
+            price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+
+            # safer info
+            info = getattr(ticker, "fast_info", {})
+
+            pe = info.get("trailingPE", None)
+            pb = info.get("priceToBook", None)
+
+            # latest available data (not strict year)
+            data = df[df["Symbol"] == stock].sort_values("Year").tail(1)
 
             roe = None
             if not data.empty and data["Equity"].values[0] != 0:
@@ -160,15 +168,27 @@ with tab2:
 
             rows.append({
                 "Stock": stock,
-                "P/E": info.get("trailingPE"),
-                "P/B": info.get("priceToBook"),
+                "Price": round(price, 2) if price else None,
+                "P/E": pe,
+                "P/B": pb,
                 "ROE %": round(roe, 2) if roe else None
             })
 
         except:
-            continue
+            rows.append({
+                "Stock": stock,
+                "Price": None,
+                "P/E": None,
+                "P/B": None,
+                "ROE %": None
+            })
 
-    st.dataframe(pd.DataFrame(rows))
+    comp_df = pd.DataFrame(rows)
+
+    if not comp_df.empty:
+        st.dataframe(comp_df)
+    else:
+        st.warning("⚠️ No comparables data available")
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -201,7 +221,7 @@ with tab2:
     if not roe_df.empty:
         st.line_chart(roe_df)
 
-    # ---------- P/B (HYBRID FINAL) ----------
+    # ---------- P/B ----------
     st.subheader("P/B Trend")
 
     pb_df = pd.DataFrame()
