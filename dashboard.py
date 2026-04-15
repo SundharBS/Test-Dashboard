@@ -18,7 +18,8 @@ def load_data():
     df["Shares"] = pd.to_numeric(df["Shares"], errors="coerce")
     df["Equity"] = pd.to_numeric(df["Equity"], errors="coerce")
     df["Revenue"] = pd.to_numeric(df["Revenue"], errors="coerce")
-    df["NetIncome"] = pd.to_numeric(df.get("NetIncome"), errors="coerce")
+    df["NetIncome"] = pd.to_numeric(df["NetIncome"], errors="coerce")
+    df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
 
     df = df.sort_values(["Symbol", "Year"])
     df = df.ffill()
@@ -144,12 +145,10 @@ with tab2:
         roe = None
 
         try:
-            # PRICE
             hist = yf.Ticker(stock + ".NS").history(period="1d")
             if not hist.empty:
                 price = float(hist["Close"].iloc[-1])
 
-            # DATASET
             data = df[df["Symbol"] == stock].sort_values("Year").tail(1)
 
             if not data.empty:
@@ -157,21 +156,15 @@ with tab2:
                 equity = data["Equity"].values[0]
                 shares = data["Shares"].values[0]
 
-                # EPS
                 eps = net_income / shares if shares not in [0, None] else None
-
-                # BVPS
                 bvps = equity / shares if shares not in [0, None] else None
 
-                # P/E (ALLOW NEGATIVE)
                 if price is not None and eps is not None:
                     pe = price / eps
 
-                # P/B
                 if price is not None and bvps is not None:
                     pb = price / bvps
 
-                # ROE
                 if equity not in [0, None]:
                     roe = (net_income / equity) * 100
 
@@ -190,24 +183,40 @@ with tab2:
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
+
     rev_df = pd.DataFrame()
 
     for s in selected_stocks:
-        data = df[df["Symbol"] == s]
-        if not data.empty:
+        try:
+            data = df[df["Symbol"] == s].copy()
+
+            data = data.dropna(subset=["Year", "Revenue"])
+            data = data.sort_values("Year")
+
+            if data.empty:
+                continue
+
             series = data.set_index("Year")["Revenue"]
-            series.name = s
+            series.name = str(s)
+
             rev_df = pd.concat([rev_df, series], axis=1)
+
+        except:
+            continue
 
     if not rev_df.empty:
         st.line_chart(rev_df)
+    else:
+        st.warning("⚠️ No revenue data available")
 
     # ---------- ROE ----------
     st.subheader("ROE Trend")
+
     roe_df = pd.DataFrame()
 
     for s in selected_stocks:
         data = df[df["Symbol"] == s].copy()
+        data = data.dropna(subset=["NetIncome", "Equity"])
         data = data[data["Equity"] != 0]
 
         if not data.empty:
