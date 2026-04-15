@@ -31,8 +31,7 @@ def get_live_prices_bulk(stocks):
     prices = {}
     for stock in stocks:
         try:
-            ticker = yf.Ticker(stock + ".NS")
-            hist = ticker.history(period="1d")
+            hist = yf.Ticker(stock + ".NS").history(period="1d")
             prices[stock] = float(hist["Close"].iloc[-1]) if not hist.empty else None
         except:
             prices[stock] = None
@@ -77,15 +76,10 @@ def calculate_dcf(net_income_series, growth_rate=0.1, discount_rate=0.12):
     except:
         return None
 
-# ---------- EXPORT ----------
-def to_excel(df):
-    return df.to_csv(index=True).encode("utf-8")
-
 df = load_data()
-
 stocks = sorted(df["Symbol"].dropna().unique())
 
-selected_stocks = st.multiselect("🔍 Search Stocks", stocks)
+selected_stocks = st.multiselect("🔍 Select Stocks", stocks)
 if not selected_stocks:
     selected_stocks = [stocks[0]]
 
@@ -100,14 +94,13 @@ tab1, tab2, tab3, tab4 = st.tabs(
 # =========================
 with tab1:
 
-    st.subheader("Live Price")
+    st.subheader("Live Prices")
     cols = st.columns(len(selected_stocks))
 
     for i, stock in enumerate(selected_stocks):
         price = live_prices.get(stock)
         cols[i].metric(stock, f"₹{round(price,2)}" if price else "N/A")
 
-    # ---------- HISTORICAL PRICE ----------
     st.subheader("Historical Price Trend")
 
     col1, col2 = st.columns(2)
@@ -119,7 +112,6 @@ with tab1:
     for stock in selected_stocks:
         try:
             data = yf.download(stock + ".NS", start=start, end=end)
-
             if data.empty:
                 data = yf.download(stock + ".NS", period="1y")
 
@@ -127,7 +119,6 @@ with tab1:
                 series = data["Close"].dropna()
                 series.name = str(stock)
                 price_df = pd.concat([price_df, series], axis=1)
-
         except:
             continue
 
@@ -137,7 +128,7 @@ with tab1:
         st.warning("⚠️ No price data available")
 
 # =========================
-# TAB 2 — COMPARABLES (FIXED)
+# TAB 2 — COMPARABLES
 # =========================
 with tab2:
 
@@ -146,49 +137,56 @@ with tab2:
     rows = []
 
     for stock in selected_stocks:
+
+        price = None
+        pe = None
+        pb = None
+        roe = None
+
         try:
-            ticker = yf.Ticker(stock + ".NS")
+            # PRICE
+            hist = yf.Ticker(stock + ".NS").history(period="1d")
+            if not hist.empty:
+                price = float(hist["Close"].iloc[-1])
 
-            # safer live price
-            hist = ticker.history(period="1d")
-            price = float(hist["Close"].iloc[-1]) if not hist.empty else None
-
-            # safer info
-            info = getattr(ticker, "fast_info", {})
-
-            pe = info.get("trailingPE", None)
-            pb = info.get("priceToBook", None)
-
-            # latest available data (not strict year)
+            # DATASET
             data = df[df["Symbol"] == stock].sort_values("Year").tail(1)
 
-            roe = None
-            if not data.empty and data["Equity"].values[0] != 0:
-                roe = (data["NetIncome"].values[0] / data["Equity"].values[0]) * 100
+            if not data.empty:
+                net_income = data["NetIncome"].values[0]
+                equity = data["Equity"].values[0]
+                shares = data["Shares"].values[0]
 
-            rows.append({
-                "Stock": stock,
-                "Price": round(price, 2) if price else None,
-                "P/E": pe,
-                "P/B": pb,
-                "ROE %": round(roe, 2) if roe else None
-            })
+                # EPS
+                eps = net_income / shares if shares not in [0, None] else None
+
+                # BVPS
+                bvps = equity / shares if shares not in [0, None] else None
+
+                # P/E (ALLOW NEGATIVE)
+                if price is not None and eps is not None:
+                    pe = price / eps
+
+                # P/B
+                if price is not None and bvps is not None:
+                    pb = price / bvps
+
+                # ROE
+                if equity not in [0, None]:
+                    roe = (net_income / equity) * 100
 
         except:
-            rows.append({
-                "Stock": stock,
-                "Price": None,
-                "P/E": None,
-                "P/B": None,
-                "ROE %": None
-            })
+            pass
 
-    comp_df = pd.DataFrame(rows)
+        rows.append({
+            "Stock": stock,
+            "Price": round(price, 2) if price is not None else None,
+            "P/E": round(pe, 2) if pe is not None else None,
+            "P/B": round(pb, 2) if pb is not None else None,
+            "ROE %": round(roe, 2) if roe is not None else None
+        })
 
-    if not comp_df.empty:
-        st.dataframe(comp_df)
-    else:
-        st.warning("⚠️ No comparables data available")
+    st.dataframe(pd.DataFrame(rows))
 
     # ---------- REVENUE ----------
     st.subheader("Revenue Trend")
@@ -221,7 +219,7 @@ with tab2:
     if not roe_df.empty:
         st.line_chart(roe_df)
 
-    # ---------- P/B ----------
+    # ---------- P/B TREND ----------
     st.subheader("P/B Trend")
 
     pb_df = pd.DataFrame()
@@ -274,17 +272,17 @@ with tab3:
     rows = []
 
     try:
-        nifty_hist = yf.download("^NSEI", period="1y")["Close"]
+        nifty = yf.download("^NSEI", period="1y")["Close"]
     except:
-        nifty_hist = None
+        nifty = None
 
     for stock in selected_stocks:
         try:
             stock_hist = yf.download(stock + ".NS", period="1y")["Close"]
 
-            if nifty_hist is not None:
+            if nifty is not None:
                 stock_return = (stock_hist.iloc[-1] / stock_hist.iloc[0] - 1) * 100
-                nifty_return = (nifty_hist.iloc[-1] / nifty_hist.iloc[0] - 1) * 100
+                nifty_return = (nifty.iloc[-1] / nifty.iloc[0] - 1) * 100
 
                 rows.append({
                     "Stock": stock,
@@ -315,9 +313,7 @@ with tab4:
             price = live_prices.get(stock)
 
             growth = calculate_cagr(data["NetIncome"])
-            if growth is None:
-                growth = 10
-            growth = growth / 100
+            growth = (growth if growth is not None else 10) / 100
 
             intrinsic = calculate_dcf(data["NetIncome"], growth)
 
